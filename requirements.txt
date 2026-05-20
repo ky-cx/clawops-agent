@@ -1,0 +1,9 @@
+# ClawOps Agent — Minimal Production Dependencies
+# ================================================
+# Python >= 3.10 required (google-genai SDK constraint)
+
+# Google Generative AI native SDK (Gemini 2.5 Flash)
+google-genai>=1.10.0
+
+# Environment variable loader (.env → os.environ)
+python-dotenv>=1.0.0
