@@ -37,6 +37,7 @@ except ImportError:
 # ── Project imports ───────────────────────────────────────────────────────────
 from utils.log_generator import get_latest_server_logs
 from tools.ops_tools import reboot_server, send_compliance_email
+from tools.approval_gate import request_reboot_approval, get_audit_log
 
 # ── Google GenAI SDK ──────────────────────────────────────────────────────────
 try:
@@ -143,11 +144,45 @@ TOOL_MAP: dict[str, Any] = {
     "send_compliance_email": send_compliance_email,
 }
 
-def dispatch_tool(name: str, args: dict) -> str:
-    """Execute the named tool locally and return its string result."""
+def dispatch_tool(name: str, args: dict, log_data: dict | None = None) -> str:
+    """
+    Execute the named tool locally and return its string result.
+
+    For destructive actions (reboot_server), an approval gate is enforced:
+    a human operator must explicitly authorise the action before it runs.
+    The decision is recorded in the immutable audit log.
+    """
     fn = TOOL_MAP.get(name)
     if fn is None:
         return f"ERROR: Unknown tool '{name}'. No action taken."
+
+    # ── Human-in-the-loop gate for destructive actions ────────────────────────
+    if name == "reboot_server":
+        server_id = args.get("server_id", "unknown")
+
+        # Enrich gate with fault details from the current log snapshot
+        error_code = "UNKNOWN"
+        error_msg  = "No details available."
+        if log_data:
+            for srv in log_data.get("servers", []):
+                if srv["server_id"] == server_id:
+                    error_code = srv.get("error_code") or error_code
+                    error_msg  = srv.get("error_msg")  or error_msg
+                    break
+
+        approved, audit_token = request_reboot_approval(
+            server_id  = server_id,
+            error_code = error_code,
+            error_msg  = error_msg,
+        )
+
+        if not approved:
+            return (
+                f"REBOOT_RESULT | server_id={server_id} | status=ABORTED | "
+                f"reason=OPERATOR_REJECTED | audit_ref={audit_token} | "
+                f"action_required=MANUAL_ESCALATION"
+            )
+
     try:
         return fn(**args)
     except Exception as exc:  # noqa: BLE001
@@ -294,8 +329,8 @@ def run_agent() -> None:
                     f"({json.dumps(fc_args, ensure_ascii=False)})"
                 )
 
-                # ── Dispatch tool locally ─────────────────────────────────────
-                result_str = dispatch_tool(fc_name, fc_args)
+                # ── Dispatch tool locally (with approval gate for reboot) ─────
+                result_str = dispatch_tool(fc_name, fc_args, log_data=log_data)
 
                 print(
                     f"{C.GREEN}[TOOL RESULT]{C.RESET} {result_str[:200]}"
@@ -329,6 +364,23 @@ def run_agent() -> None:
             "Possible reasoning loop detected.  Review conversation history.",
             C.YELLOW,
         )
+
+    # ── Approval audit summary ────────────────────────────────────────────────
+    audit = get_audit_log()
+    if audit:
+        section("APPROVAL AUDIT TRAIL", C.MAGENTA)
+        for entry in audit:
+            icon = (
+                f"{C.GREEN}✓ APPROVED{C.RESET}"
+                if entry["decision"] == "APPROVED"
+                else f"{C.RED}✗ REJECTED{C.RESET}"
+            )
+            print(
+                f"  {icon}  server={C.CYAN}{entry['server_id']}{C.RESET}"
+                f"  by={entry['approver']}"
+                f"  at={entry['timestamp'][:19]}Z"
+                f"  fault={entry['reason']}"
+            )
 
 
 # ═════════════════════════════════════════════════════════════════════════════
